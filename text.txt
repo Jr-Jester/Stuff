@@ -1,0 +1,858 @@
+package interfaces;
+
+/**
+ * Потребность в бумаге.
+ */
+public interface PaperDemand {
+    /** Число листов, необходимое для выполнения задания целиком. */
+    int getRequiredSheets();
+}
+
+package models;
+
+import interfaces.PaperDemand;
+
+import java.io.Serializable;
+
+/**
+ * Базовое абстрактное задание печати.
+ */
+public abstract class PrintJob implements PaperDemand, Serializable {
+    private static final long serialVersionUID = 1L;
+
+    private final int id;
+    private final int ownerId;
+    private final int pages;
+    private final int copies;
+    private final int priority;
+    private boolean printed;
+
+    public PrintJob(int id, int ownerId, int pages, int copies, int priority) {
+        if (id <= 0) {
+            throw new IllegalArgumentException("id должен быть положительным: " + id);
+        }
+        if (ownerId <= 0) {
+            throw new IllegalArgumentException("ownerId должен быть положительным: " + ownerId);
+        }
+        if (pages < 1 || pages > 100) {
+            throw new IllegalArgumentException("pages должен быть от 1 до 100: " + pages);
+        }
+        if (copies < 1 || copies > 100) {
+            throw new IllegalArgumentException("copies должен быть от 1 до 100: " + copies);
+        }
+        if (priority < 1 || priority > 5) {
+            throw new IllegalArgumentException("priority должен быть от 1 до 5: " + priority);
+        }
+        this.id = id;
+        this.ownerId = ownerId;
+        this.pages = pages;
+        this.copies = copies;
+        this.priority = priority;
+        this.printed = false;
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    public int getOwnerId() {
+        return ownerId;
+    }
+
+    public int getPages() {
+        return pages;
+    }
+
+    public int getCopies() {
+        return copies;
+    }
+
+    public int getPriority() {
+        return priority;
+    }
+
+    public boolean isPrinted() {
+        return printed;
+    }
+
+    public void markPrinted() {
+        this.printed = true;
+    }
+
+    public abstract String getDetails();
+}
+
+package models;
+
+/**
+ * Одностороннее задание: потребность = pages * copies.
+ */
+public class SingleSidedJob extends PrintJob {
+    private static final long serialVersionUID = 1L;
+
+    public SingleSidedJob(int id, int ownerId, int pages, int copies, int priority) {
+        super(id, ownerId, pages, copies, priority);
+    }
+
+    @Override
+    public int getRequiredSheets() {
+        return getPages() * getCopies();
+    }
+
+    @Override
+    public String getDetails() {
+        return "SingleSidedJob{id=" + getId()
+                + ", owner=" + getOwnerId()
+                + ", pages=" + getPages()
+                + ", copies=" + getCopies()
+                + ", priority=" + getPriority()
+                + ", sheets=" + getRequiredSheets()
+                + ", status=" + (isPrinted() ? "напечатано" : "ожидает") + "}";
+    }
+}
+
+package models;
+
+/**
+ * Двустороннее задание: на каждый экземпляр - половина pages, округлённая вверх.
+ * Каждый экземпляр начинается на новом листе.
+ */
+public class DoubleSidedJob extends PrintJob {
+    private static final long serialVersionUID = 1L;
+
+    public DoubleSidedJob(int id, int ownerId, int pages, int copies, int priority) {
+        super(id, ownerId, pages, copies, priority);
+    }
+
+    @Override
+    public int getRequiredSheets() {
+        int sheetsPerCopy = (getPages() + 1) / 2; // округление вверх
+        return sheetsPerCopy * getCopies();
+    }
+
+    @Override
+    public String getDetails() {
+        return "DoubleSidedJob{id=" + getId()
+                + ", owner=" + getOwnerId()
+                + ", pages=" + getPages()
+                + ", copies=" + getCopies()
+                + ", priority=" + getPriority()
+                + ", sheets=" + getRequiredSheets()
+                + ", status=" + (isPrinted() ? "напечатано" : "ожидает") + "}";
+    }
+}
+
+package logic;
+
+import models.PrintJob;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/**
+ * Очередь печати одного принтера.
+ */
+public class PrintQueue<T extends PrintJob> implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public static final int MAX_PAPER = 1_000_000;
+
+    private final List<T> jobs = new ArrayList<>();
+    private int paper;
+
+    public PrintQueue(int paper) {
+        if (paper < 0 || paper > MAX_PAPER) {
+            throw new IllegalArgumentException("Начальный запас бумаги: 0.." + MAX_PAPER);
+        }
+        this.paper = paper;
+    }
+
+    /** false при null, повторном id или уже напечатанном задании; очередь при отказе не меняется. */
+    public boolean add(T job) {
+        if (job == null || job.isPrinted()) {
+            return false;
+        }
+        boolean duplicate = jobs.stream().anyMatch(j -> j.getId() == job.getId());
+        if (duplicate) {
+            return false;
+        }
+        jobs.add(job);
+        return true;
+    }
+
+    public int getPaper() {
+        return paper;
+    }
+
+    /** Добавляет положительное amount; при превышении лимита - false без изменений. */
+    public boolean restock(int amount) {
+        if (amount <= 0) {
+            return false;
+        }
+        long total = (long) paper + amount;
+        if (total > MAX_PAPER) {
+            return false;
+        }
+        paper = (int) total;
+        return true;
+    }
+
+    /** Новый поток всех заданий очереди (включая напечатанные). */
+    public Stream<T> getAnalyticsStream() {
+        return jobs.stream();
+    }
+
+    /**
+     * Рассматривает ожидающие задания в порядке order. Задание выполняется целиком,
+     * если хватает бумаги и выполнено condition: бумага уменьшается на потребность,
+     * затем применяется action. Возвращает новые выполненные задания в порядке выполнения.
+     */
+    public List<T> process(Predicate<T> condition, Comparator<T> order, Consumer<T> action) {
+        Objects.requireNonNull(condition, "condition");
+        Objects.requireNonNull(order, "order");
+        Objects.requireNonNull(action, "action");
+
+        List<T> candidates = jobs.stream()
+                .filter(j -> !j.isPrinted())
+                .sorted(order)
+                .collect(Collectors.toList());
+
+        List<T> done = new ArrayList<>();
+        for (T job : candidates) {
+            if (job.isPrinted()) {
+                continue;
+            }
+            int need = job.getRequiredSheets();
+            if (need > paper) {
+                continue;               // не хватает бумаги - задание ждёт
+            }
+            if (!condition.test(job)) {
+                continue;               // условие не выполнено - задание ждёт
+            }
+            paper -= need;
+            action.accept(job);
+            done.add(job);
+        }
+        return done;
+    }
+}
+
+package main;
+
+import logic.PrintQueue;
+import models.DoubleSidedJob;
+import models.PrintJob;
+import models.SingleSidedJob;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Scanner;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+public class Main {
+
+    private static final String STATE_FILE = "print_state.dat";
+    private static final int INITIAL_PAPER = 14;
+
+    /** Сохраняемое состояние всей цепочки этапов. */
+    static final class AppState implements Serializable {
+        private static final long serialVersionUID = 1L;
+        PrintQueue<PrintJob> queue = new PrintQueue<>(INITIAL_PAPER);
+        int paper = INITIAL_PAPER;
+        int n = 0;
+        int stageA = 0;          // номер А (условие этапа 1)
+        int stageB = 0;          // номер Б (правило этапа 2 и 3)
+        int stageV = 0;          // номер В (отчёт этапа 3)
+        int lastCompleted = 0;   // последний завершённый этап (0..3)
+    }
+
+    /** Набор функциональных объектов для одного вызова process(). */
+    private static final class Rule {
+        final Predicate<PrintJob> condition;
+        final Comparator<PrintJob> order;
+        final Consumer<PrintJob> action;
+
+        Rule(Predicate<PrintJob> condition, Comparator<PrintJob> order, Consumer<PrintJob> action) {
+            this.condition = condition;
+            this.order = order;
+            this.action = action;
+        }
+    }
+
+    // ------------------------------------------------------------------ main
+
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+
+        AppState state = loadState(sc);
+        if (state == null) {
+            return; // пользователь отказался от нового запуска после ошибки чтения
+        }
+
+        if (state.n == 0) {
+            if (!askN(sc, state)) {
+                return; // конец ввода
+            }
+        } else {
+            System.out.println("Состояние восстановлено. N = " + state.n
+                    + ", последний завершённый этап: " + state.lastCompleted);
+        }
+
+        boolean running = true;
+        while (running) {
+            printMenu();
+            String line = readLine(sc);
+            if (line == null) {
+                line = "5"; // конец ввода - выходим как по пункту 5
+            }
+            int choice;
+            try {
+                choice = Integer.parseInt(line.trim());
+            } catch (NumberFormatException e) {
+                System.out.println("Ошибка ввода: введите число от 1 до 5.");
+                continue;
+            }
+
+            switch (choice) {
+                case 1:
+                    runStage1(state);
+                    break;
+                case 2:
+                    runStage2(state);
+                    break;
+                case 3:
+                    runStage3(state);
+                    break;
+                case 4:
+                    showQueue(state);
+                    break;
+                case 5:
+                    if (saveState(state)) {
+                        System.out.println("Состояние сохранено в " + STATE_FILE + ". До свидания!");
+                        running = false;
+                    } else {
+                        System.out.println("Возврат в меню с текущими данными.");
+                    }
+                    break;
+                default:
+                    System.out.println("Неизвестный пункт меню. Выберите число от 1 до 5.");
+            }
+        }
+    }
+
+    private static void printMenu() {
+        System.out.println();
+        System.out.println("===== Управление очередью печати =====");
+        System.out.println("1. Выполнить задание 1 и вывести назначенный вариант задания 2");
+        System.out.println("2. Выполнить задание 2 и вывести назначенный вариант задания 3");
+        System.out.println("3. Выполнить задание 3 и вывести отчёт");
+        System.out.println("4. Показать очередь, статусы и остаток бумаги");
+        System.out.println("5. Выход из программы");
+        System.out.print("Ваш выбор: ");
+    }
+
+    private static String readLine(Scanner sc) {
+        return sc.hasNextLine() ? sc.nextLine() : null;
+    }
+
+    private static boolean askN(Scanner sc, AppState state) {
+        while (true) {
+            System.out.print("Введите начальный номер N (1..36): ");
+            String line = readLine(sc);
+            if (line == null) {
+                return false;
+            }
+            try {
+                int n = Integer.parseInt(line.trim());
+                state.stageA = StageAccess.initial(n); // бросает IAE при N вне диапазона
+                state.n = n;
+                System.out.println("N = " + n + ", вариант задания 1: А" + state.stageA);
+                return true;
+            } catch (IllegalArgumentException e) { // включает NumberFormatException
+                System.out.println("Ошибка ввода: N должно быть целым числом от 1 до 36.");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- stage 1
+
+    private static void runStage1(AppState state) {
+        if (state.lastCompleted >= 1) {
+            System.out.println("Этап 1 уже выполнен. Повторное выполнение не меняет данные.");
+            return;
+        }
+        Predicate<PrintJob> condition = stage1Condition(state.stageA);
+
+        PrintQueue<PrintJob> fresh = new PrintQueue<>(INITIAL_PAPER);
+        createSourceJobs().stream().filter(condition).forEach(fresh::add);
+
+        List<Integer> ids = fresh.getAnalyticsStream()
+                .map(PrintJob::getId)
+                .sorted()
+                .collect(Collectors.toList());
+        int sheets = fresh.getAnalyticsStream()
+                .mapToInt(PrintJob::getRequiredSheets)
+                .sum();
+
+        System.out.println("Задание 1, условие А" + state.stageA + ": " + stage1Text(state.stageA));
+        System.out.println("ID добавленных заданий: " + ids);
+        System.out.println("Сумма потребностей: " + sheets + " л.");
+
+        int b;
+        try {
+            b = StageAccess.second(state.n, ids, sheets);
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            System.out.println("Служебный код отклонил результат этапа 1: " + e.getMessage());
+            System.out.println("Проверьте решение. Этап не засчитан, данные не изменены.");
+            return;
+        }
+        state.queue = fresh;
+        state.paper = fresh.getPaper();
+        state.stageB = b;
+        state.lastCompleted = 1;
+        System.out.println("Назначен вариант задания 2: Б" + b + " - " + stage2Text(b));
+    }
+
+    private static List<PrintJob> createSourceJobs() {
+        List<PrintJob> all = new ArrayList<>();
+        all.add(new SingleSidedJob(101, 11, 5, 1, 5));
+        all.add(new SingleSidedJob(103, 12, 4, 2, 5));
+        all.add(new SingleSidedJob(105, 13, 3, 2, 2));
+        all.add(new SingleSidedJob(108, 14, 6, 1, 3));
+        all.add(new SingleSidedJob(110, 15, 8, 1, 2));
+        all.add(new DoubleSidedJob(102, 11, 5, 2, 4));
+        all.add(new DoubleSidedJob(104, 12, 7, 1, 3));
+        all.add(new DoubleSidedJob(106, 13, 9, 1, 4));
+        all.add(new DoubleSidedJob(107, 14, 2, 3, 1));
+        all.add(new DoubleSidedJob(109, 12, 1, 2, 4));
+        all.sort(Comparator.comparingInt(PrintJob::getId)); // результат всегда по возрастанию id
+        return all;
+    }
+
+    private static Predicate<PrintJob> stage1Condition(int a) {
+        switch (a) {
+            case 1:
+                return j -> j.getPriority() >= 3 && j.getRequiredSheets() <= 8;
+            case 2:
+                return j -> j.getCopies() >= 2 && j.getRequiredSheets() <= 12;
+            case 3:
+                return j -> j.getPages() % 2 == 1 && j.getPriority() >= 2;
+            case 4:
+                return j -> (j instanceof DoubleSidedJob && j.getPages() >= 5)
+                        || (j instanceof SingleSidedJob && j.getPriority() >= 4);
+            case 5:
+                return j -> j.getRequiredSheets() >= 4 && j.getPriority() >= 3 && j.getCopies() <= 2;
+            case 6:
+                return j -> (j.getCopies() == 1 && j.getPriority() >= 3)
+                        || (j.getCopies() >= 2 && j.getRequiredSheets() <= 4);
+            default:
+                throw new IllegalArgumentException("Неизвестный вариант А: " + a);
+        }
+    }
+
+    private static String stage1Text(int a) {
+        switch (a) {
+            case 1: return "приоритетные короткие задания (priority >= 3, потребность <= 8)";
+            case 2: return "несколько экземпляров (copies >= 2, потребность <= 12)";
+            case 3: return "нечётное число страниц (pages нечётно, priority >= 2)";
+            case 4: return "способ печати (двустороннее pages >= 5 либо одностороннее priority >= 4)";
+            case 5: return "средний объём (потребность >= 4, priority >= 3, copies <= 2)";
+            default: return "один экземпляр или малый расход (copies = 1 и priority >= 3 либо copies >= 2 и потребность <= 4)";
+        }
+    }
+
+    // ---------------------------------------------------------------- stage 2
+
+    private static void runStage2(AppState state) {
+        if (state.lastCompleted >= 2) {
+            System.out.println("Этап 2 уже выполнен. Повторное выполнение не меняет данные.");
+            return;
+        }
+        if (state.lastCompleted < 1) {
+            System.out.println("Этап 2 недоступен: сначала выполните этап 1.");
+            return;
+        }
+
+        PrintQueue<PrintJob> work;
+        try {
+            work = copyQueue(state.queue); // работаем с копией: при отказе данные не меняются
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Внутренняя ошибка: " + e.getMessage());
+            return;
+        }
+
+        Rule rule = buildRule(state.stageB, work);
+        List<PrintJob> done = work.process(rule.condition, rule.order, rule.action);
+
+        List<Integer> ids = done.stream().map(PrintJob::getId).collect(Collectors.toList());
+        int paper = work.getPaper();
+
+        System.out.println("Задание 2, правило Б" + state.stageB + ": " + stage2Text(state.stageB));
+        System.out.println("Выполненные задания (по порядку выполнения): " + ids);
+        System.out.println("Остаток бумаги: " + paper + " л.");
+
+        int v;
+        try {
+            v = StageAccess.third(state.n, ids, paper);
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            System.out.println("Служебный код отклонил результат этапа 2: " + e.getMessage());
+            System.out.println("Проверьте решение. Этап не засчитан, данные не изменены.");
+            return;
+        }
+        state.queue = work;
+        state.paper = work.getPaper();
+        state.stageV = v;
+        state.lastCompleted = 2;
+        System.out.println("Назначен вариант задания 3: В" + v + " - " + stage3Text(v));
+    }
+
+    /** Новое состояние функциональных объектов создаётся на каждый вызов process(). */
+    private static Rule buildRule(int b, PrintQueue<PrintJob> queue) {
+        Comparator<PrintJob> byPriorityDesc = Comparator.comparingInt(PrintJob::getPriority).reversed();
+        Comparator<PrintJob> byId = Comparator.comparingInt(PrintJob::getId);
+        Comparator<PrintJob> byNeedAsc = Comparator.comparingInt(PrintJob::getRequiredSheets);
+        Comparator<PrintJob> byNeedDesc = byNeedAsc.reversed();
+
+        switch (b) {
+            case 1: { // Б1 Сначала меньший расход
+                Comparator<PrintJob> order = byPriorityDesc.thenComparing(byNeedAsc).thenComparing(byId);
+                return new Rule(j -> true, order, PrintJob::markPrinted);
+            }
+            case 2: { // Б2 Сначала больший расход
+                Comparator<PrintJob> order = byPriorityDesc.thenComparing(byNeedDesc).thenComparing(byId);
+                return new Rule(j -> true, order, PrintJob::markPrinted);
+            }
+            case 3: { // Б3 Одна печать владельцу
+                Set<Integer> printedOwners = new HashSet<>();
+                Comparator<PrintJob> order = byPriorityDesc.thenComparing(byId);
+                return new Rule(
+                        j -> !printedOwners.contains(j.getOwnerId()),
+                        order,
+                        j -> {
+                            j.markPrinted();
+                            printedOwners.add(j.getOwnerId());
+                        });
+            }
+            case 4: { // Б4 Резерв бумаги: не менее ceil(остаток / 4), фиксируется на начало вызова
+                final int reserve = (queue.getPaper() + 3) / 4;
+                Comparator<PrintJob> order = byPriorityDesc.thenComparing(byNeedAsc).thenComparing(byId);
+                return new Rule(
+                        j -> queue.getPaper() - j.getRequiredSheets() >= reserve,
+                        order,
+                        PrintJob::markPrinted);
+            }
+            case 5: { // Б5 Не более двух заданий каждого владельца за вызов
+                Map<Integer, Integer> perOwner = new HashMap<>();
+                Comparator<PrintJob> order = byNeedAsc.thenComparing(byPriorityDesc).thenComparing(byId);
+                return new Rule(
+                        j -> perOwner.getOrDefault(j.getOwnerId(), 0) < 2,
+                        order,
+                        j -> {
+                            j.markPrinted();
+                            perOwner.merge(j.getOwnerId(), 1, Integer::sum);
+                        });
+            }
+            case 6: { // Б6 Очередь без преимущества истории: число прежних печатей фиксируется на вызов
+                Map<Integer, Long> history = queue.getAnalyticsStream()
+                        .filter(PrintJob::isPrinted)
+                        .collect(Collectors.groupingBy(PrintJob::getOwnerId, Collectors.counting()));
+                Comparator<PrintJob> order = Comparator
+                        .comparingLong((PrintJob j) -> history.getOrDefault(j.getOwnerId(), 0L))
+                        .thenComparing(byPriorityDesc)
+                        .thenComparing(byId);
+                return new Rule(j -> true, order, PrintJob::markPrinted);
+            }
+            default:
+                throw new IllegalArgumentException("Неизвестный вариант Б: " + b);
+        }
+    }
+
+    private static String stage2Text(int b) {
+        switch (b) {
+            case 1: return "сначала меньший расход (priority desc, потребность asc, id asc)";
+            case 2: return "сначала больший расход (priority desc, потребность desc, id asc)";
+            case 3: return "одна печать владельцу (priority desc, id asc; не более 1 задания на ownerId)";
+            case 4: return "резерв бумаги (не менее четверти остатка на начало вызова, округлённой вверх)";
+            case 5: return "не более двух заданий (потребность asc, priority desc, id asc; до 2 на ownerId)";
+            default: return "очередь без преимущества истории (владельцы с меньшим числом печатей вначале)";
+        }
+    }
+
+    // ---------------------------------------------------------------- stage 3
+
+    private static void runStage3(AppState state) {
+        if (state.lastCompleted >= 3) {
+            System.out.println("Этап 3 уже выполнен. Повторное выполнение не меняет данные.");
+            return;
+        }
+        if (state.lastCompleted < 2) {
+            System.out.println("Этап 3 недоступен: сначала выполните этап 2.");
+            return;
+        }
+
+        int add = 3 + state.stageV; // В1 -> 4 листа, ..., В6 -> 9 листов
+
+        PrintQueue<PrintJob> work;
+        try {
+            work = copyQueue(state.queue);
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Внутренняя ошибка: " + e.getMessage());
+            return;
+        }
+
+        if (!work.restock(add)) {
+            System.out.println("Не удалось пополнить бумагу на " + add + " л. Данные не изменены.");
+            return;
+        }
+        System.out.println("Бумага пополнена на " + add + " л. Остаток: " + work.getPaper() + " л.");
+
+        Rule rule = buildRule(state.stageB, work);
+        List<PrintJob> done = work.process(rule.condition, rule.order, rule.action);
+        List<Integer> ids = done.stream().map(PrintJob::getId).collect(Collectors.toList());
+
+        System.out.println("Задание 3, правило Б" + state.stageB + " повторно.");
+        System.out.println("Новые выполненные задания (по порядку выполнения): " + ids);
+        System.out.println("Остаток бумаги: " + work.getPaper() + " л.");
+        System.out.println("Отчёт В" + state.stageV + " - " + stage3Text(state.stageV) + ":");
+        printReport(state.stageV, work);
+
+        state.queue = work;
+        state.paper = work.getPaper();
+        state.lastCompleted = 3;
+    }
+
+    /** Отчёты строятся исключительно через Stream API и не меняют очередь. */
+    private static void printReport(int v, PrintQueue<PrintJob> q) {
+        switch (v) {
+            case 1: { // ownerId -> суммарное число листов по напечатанным заданиям
+                Map<Integer, Long> r = q.getAnalyticsStream()
+                        .filter(PrintJob::isPrinted)
+                        .collect(Collectors.groupingBy(PrintJob::getOwnerId,
+                                Collectors.summingLong(PrintJob::getRequiredSheets)));
+                printMap(r);
+                break;
+            }
+            case 2: { // владельцы, у которых есть и напечатанные, и ожидающие задания
+                List<Integer> r = q.getAnalyticsStream()
+                        .map(PrintJob::getOwnerId)
+                        .distinct()
+                        .filter(owner -> q.getAnalyticsStream()
+                                .anyMatch(j -> j.getOwnerId() == owner && j.isPrinted()))
+                        .filter(owner -> q.getAnalyticsStream()
+                                .anyMatch(j -> j.getOwnerId() == owner && !j.isPrinted()))
+                        .sorted()
+                        .collect(Collectors.toList());
+                System.out.println("  " + r);
+                break;
+            }
+            case 3: { // ожидающее задание, помещающееся в остаток, с наибольшей потребностью
+                Optional<PrintJob> r = q.getAnalyticsStream()
+                        .filter(j -> !j.isPrinted())
+                        .filter(j -> j.getRequiredSheets() <= q.getPaper())
+                        .max(Comparator.comparingInt(PrintJob::getRequiredSheets)
+                                .thenComparingInt(PrintJob::getPriority)
+                                .thenComparing(Comparator.comparingInt(PrintJob::getId).reversed()));
+                System.out.println("  " + r.map(PrintJob::getDetails).orElse("нет подходящего задания (пусто)"));
+                break;
+            }
+            case 4: { // имя класса -> суммарное число страниц во всех напечатанных экземплярах
+                Map<String, Long> r = Stream.of(SingleSidedJob.class, DoubleSidedJob.class)
+                        .collect(Collectors.toMap(
+                                Class::getSimpleName,
+                                cls -> q.getAnalyticsStream()
+                                        .filter(PrintJob::isPrinted)
+                                        .filter(j -> j.getClass() == cls)
+                                        .mapToLong(j -> (long) j.getPages() * j.getCopies())
+                                        .sum()));
+                printMap(r);
+                break;
+            }
+            case 5: { // владелец с наибольшей общей потребностью ожидающих заданий
+                Optional<Integer> r = q.getAnalyticsStream()
+                        .filter(j -> !j.isPrinted())
+                        .collect(Collectors.groupingBy(PrintJob::getOwnerId,
+                                Collectors.summingLong(PrintJob::getRequiredSheets)))
+                        .entrySet().stream()
+                        .max(Map.Entry.<Integer, Long>comparingByValue()
+                                .thenComparing(Map.Entry.<Integer, Long>comparingByKey().reversed()))
+                        .map(Map.Entry::getKey);
+                System.out.println("  " + (r.isPresent() ? "ownerId = " + r.get() : "нет ожидающих заданий (пусто)"));
+                break;
+            }
+            case 6: { // ownerId -> доля напечатанных заданий
+                Map<Integer, Double> r = q.getAnalyticsStream()
+                        .collect(Collectors.groupingBy(PrintJob::getOwnerId,
+                                Collectors.averagingDouble(j -> j.isPrinted() ? 1.0 : 0.0)));
+                printMap(r);
+                break;
+            }
+            default:
+                System.out.println("  Неизвестный вариант В: " + v);
+        }
+    }
+
+    private static <K extends Comparable<K>, V> void printMap(Map<K, V> map) {
+        if (map.isEmpty()) {
+            System.out.println("  (пусто)");
+            return;
+        }
+        map.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> System.out.println("  " + e.getKey() + " -> " + e.getValue()));
+    }
+
+    private static String stage3Text(int v) {
+        switch (v) {
+            case 1: return "+4 листа; ownerId -> листы по напечатанным заданиям";
+            case 2: return "+5 листов; владельцы с напечатанными и ожидающими заданиями";
+            case 3: return "+6 листов; крупнейшее ожидающее задание, помещающееся в остаток";
+            case 4: return "+7 листов; страницы напечатанных экземпляров по классам";
+            case 5: return "+8 листов; владелец с наибольшей потребностью ожидающих заданий";
+            default: return "+9 листов; доля напечатанных заданий по владельцам";
+        }
+    }
+
+    // ------------------------------------------------------------- show queue
+
+    private static void showQueue(AppState state) {
+        System.out.println("N = " + (state.n == 0 ? "не задан" : state.n)
+                + ", завершённых этапов: " + state.lastCompleted
+                + (state.stageA > 0 ? ", А" + state.stageA : "")
+                + (state.stageB > 0 ? ", Б" + state.stageB : "")
+                + (state.stageV > 0 ? ", В" + state.stageV : ""));
+        long count = state.queue.getAnalyticsStream().count();
+        if (count == 0) {
+            System.out.println("Очередь пуста.");
+        } else {
+            state.queue.getAnalyticsStream()
+                    .sorted(Comparator.comparingInt(PrintJob::getId))
+                    .forEach(j -> System.out.println("  " + j.getDetails()));
+        }
+        System.out.println("Остаток бумаги: " + state.queue.getPaper() + " л.");
+    }
+
+    // ----------------------------------------------------------- persistence
+
+    private static boolean saveState(AppState state) {
+        state.paper = state.queue.getPaper();
+        try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(STATE_FILE))) {
+            out.writeObject(state);
+            return true;
+        } catch (IOException e) {
+            System.out.println("Ошибка записи файла " + STATE_FILE + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Возвращает состояние, новую цепочку или null, если от нового запуска отказались. */
+    private static AppState loadState(Scanner sc) {
+        File file = new File(STATE_FILE);
+        if (!file.exists()) {
+            return new AppState();
+        }
+        try (ObjectInputStream in = new ObjectInputStream(new FileInputStream(file))) {
+            AppState state = (AppState) in.readObject();
+            if (state == null || state.queue == null) {
+                throw new IOException("файл повреждён");
+            }
+            return state;
+        } catch (IOException | ClassNotFoundException | ClassCastException e) {
+            System.out.println("Ошибка чтения файла " + STATE_FILE + ": " + e.getMessage());
+            while (true) {
+                System.out.print("Начать новый запуск (старый файл будет перезаписан при выходе)? (д/н): ");
+                String answer = readLine(sc);
+                if (answer == null) {
+                    return null;
+                }
+                answer = answer.trim().toLowerCase();
+                if (answer.equals("д") || answer.equals("y") || answer.equals("да")) {
+                    return new AppState();
+                }
+                if (answer.equals("н") || answer.equals("n") || answer.equals("нет")) {
+                    return null;
+                }
+                System.out.println("Введите «д» или «н».");
+            }
+        }
+    }
+
+    /** Глубокая копия очереди через сериализацию (для отката при отклонённом результате). */
+    @SuppressWarnings("unchecked")
+    private static PrintQueue<PrintJob> copyQueue(PrintQueue<PrintJob> source)
+            throws IOException, ClassNotFoundException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (ObjectOutputStream out = new ObjectOutputStream(bytes)) {
+            out.writeObject(source);
+        }
+        try (ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
+            return (PrintQueue<PrintJob>) in.readObject();
+        }
+    }
+}
+
+final class StageAccess {
+    private static final int[] S = {5, 3, 2, 4, 2, 1};
+    private static final int[] A = {
+        0xcb89387d, 0x4626b7fe, 0xacac2431, 0x4997263f, 0x6b20cc2b,
+        0x209a21ae
+    };
+    private static final int[] B = {
+        0x6128024d, 0x38a00d09, 0x38a2c749, 0x2ad3a538, 0x38a00d09,
+        0x38a00d09, 0x612876ab, 0x612ba548, 0xe7a1669a, 0x612876ab,
+        0xc4f9d0bb, 0x612876ab, 0xf3601d34, 0x013dc91f, 0xf3601d34,
+        0x4471d939, 0x38a2c749, 0x2ad3a538, 0x6128024d, 0x38a00d09,
+        0x38a16a29, 0x04b3adf2, 0x38a00d09, 0x38a00d09, 0x38a00d09,
+        0x38a00d09, 0x6128024d, 0x38a00d09, 0x38a16a29, 0x04b3adf2,
+        0x013dc91f, 0x4471d939, 0x4471d939, 0x013e3d80, 0x0d1d0f0f,
+        0x4471d939
+    };
+    static int initial(int n) {
+        if (n < 1 || n > 36)
+            throw new IllegalArgumentException("N: 1..36");
+        return (n - 1) / 6 + 1;
+    }
+    static int second(int n, java.util.List<Integer> ids, int sheets) {
+        int a = initial(n);
+        return check(n, ids, sheets, A[a - 1], 0);
+    }
+    static int third(int n, java.util.List<Integer> ids, int paper) {
+        int a = initial(n);
+        int b = 1 + Math.floorMod((long) A[a - 1] + (n - 1) % 6, 6);
+        return check(n, ids, paper, B[n - 1], b);
+    }
+    private static int check(int n, java.util.List<Integer> ids,
+                             int value, int expected, int previous) {
+        if (ids == null) throw new IllegalArgumentException("ids: null");
+        int actual = (ids + "|" + value).hashCode();
+        if (actual != expected)
+            throw new IllegalStateException("Check stage result");
+        long key = previous == 0 ? actual
+            : (actual >>> 6) + 0L * previous
+            + (1 - 1L) * ((n - 1) % 6) + S[initial(n) - 1];
+        return 1 + Math.floorMod(key + (n - 1) % 6, 6);
+    }
+}
