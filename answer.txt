@@ -1,0 +1,233 @@
+import java.util.*;
+import java.util.function.*;
+import java.util.stream.*;
+
+interface PaperDemand {
+    int getRequiredSheets();
+}
+
+abstract class PrintJob implements PaperDemand {
+    private final int id, ownerId, pages, copies, priority;
+    private boolean printed = false;
+
+    public PrintJob(int id, int ownerId, int pages, int copies, int priority) {
+        if (id <= 0 || ownerId <= 0) throw new IllegalArgumentException("id/ownerId > 0");
+        if (pages < 1 || pages > 100) throw new IllegalArgumentException("pages: 1..100");
+        if (copies < 1 || copies > 100) throw new IllegalArgumentException("copies: 1..100");
+        if (priority < 1 || priority > 5) throw new IllegalArgumentException("priority: 1..5");
+        this.id = id; this.ownerId = ownerId; this.pages = pages;
+        this.copies = copies; this.priority = priority;
+    }
+
+    public int getId() { return id; }
+    public int getOwnerId() { return ownerId; }
+    public int getPages() { return pages; }
+    public int getCopies() { return copies; }
+    public int getPriority() { return priority; }
+    public boolean isPrinted() { return printed; }
+    public void markPrinted() { printed = true; }
+    public abstract String getDetails();
+    protected String statusText() { return printed ? "напечатано" : "ожидает"; }
+}
+
+class SingleSidedJob extends PrintJob {
+    public SingleSidedJob(int id, int ownerId, int pages, int copies, int priority) {
+        super(id, ownerId, pages, copies, priority);
+    }
+    @Override public int getRequiredSheets() { return getPages() * getCopies(); }
+    @Override public String getDetails() {
+        return "SingleSidedJob{id=" + getId() + ", владелец=" + getOwnerId()
+                + ", листов=" + getRequiredSheets() + ", статус=" + statusText() + "}";
+    }
+}
+
+class DoubleSidedJob extends PrintJob {
+    public DoubleSidedJob(int id, int ownerId, int pages, int copies, int priority) {
+        super(id, ownerId, pages, copies, priority);
+    }
+    @Override public int getRequiredSheets() { return ((getPages() + 1) / 2) * getCopies(); }
+    @Override public String getDetails() {
+        return "DoubleSidedJob{id=" + getId() + ", владелец=" + getOwnerId()
+                + ", листов=" + getRequiredSheets() + ", статус=" + statusText() + "}";
+    }
+}
+
+class PrintQueue<T extends PrintJob> {
+    private static final int MAX_PAPER = 1_000_000;
+    private final List<T> jobs = new ArrayList<>();
+    private int paper;
+
+    public PrintQueue(int paper) {
+        if (paper < 0 || paper > MAX_PAPER) throw new IllegalArgumentException("paper: 0..1000000");
+        this.paper = paper;
+    }
+
+    public boolean add(T job) {
+        if (job == null || job.isPrinted()) return false;
+        if (jobs.stream().anyMatch(j -> j.getId() == job.getId())) return false;
+        jobs.add(job);
+        return true;
+    }
+
+    public int getPaper() { return paper; }
+
+    public boolean restock(int amount) {
+        if (amount <= 0 || (long) paper + amount > MAX_PAPER) return false;
+        paper += amount;
+        return true;
+    }
+
+    public Stream<T> getAnalyticsStream() { return new ArrayList<>(jobs).stream(); }
+
+    public List<T> process(Predicate<T> condition, Comparator<T> order, Consumer<T> action) {
+        List<T> pending = jobs.stream().filter(j -> !j.isPrinted()).sorted(order)
+                .collect(Collectors.toList());
+        List<T> done = new ArrayList<>();
+        for (T job : pending) {
+            int need = job.getRequiredSheets();
+            if (need <= paper && condition.test(job)) {
+                paper -= need;
+                action.accept(job);
+                done.add(job);
+            }
+        }
+        return done;
+    }
+}
+
+public class Main {
+    // Вариант N=3: задание 1 — А1, задание 2 — Б4, задание 3 — В3
+    private static int n = 0;
+    private static int lastDone = 0;
+    private static PrintQueue<PrintJob> queue;
+
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        while (n == 0) {
+            System.out.print("Введите начальный номер N (1..36): ");
+if (!sc.hasNextLine()) return;
+            try {
+                int v = Integer.parseInt(sc.nextLine().trim());
+                StageAccess.initial(v);
+                n = v;
+            } catch (IllegalArgumentException e) {
+                System.out.println("Ошибка ввода: нужно целое число от 1 до 36.");
+            }
+        }
+        boolean running = true;
+        while (running) {
+            System.out.println("\n1. Выполнить задание 1 и вывести назначенный вариант задания 2");
+            System.out.println("2. Выполнить задание 2 и вывести назначенный вариант задания 3");
+            System.out.println("3. Выполнить задание 3 и вывести отчёт");
+            System.out.println("4. Показать очередь, статусы и остаток бумаги");
+            System.out.println("5. Выход из программы");
+            System.out.print("Выбор: ");
+            if (!sc.hasNextLine()) break;
+            int cmd;
+            try {
+                cmd = Integer.parseInt(sc.nextLine().trim());
+            } catch (NumberFormatException e) {
+                System.out.println("Ошибка ввода: введите число от 1 до 5.");
+                continue;
+            }
+            switch (cmd) {
+                case 1: stage1(); break;
+                case 2: stage2(); break;
+                case 3: stage3(); break;
+                case 4: show(); break;
+                case 5: running = false; break;
+                default: System.out.println("Нет такого пункта меню.");
+            }
+        }
+    }
+
+    // ---------- Этап 1: А1 (priority >= 3 и потребность <= 8) ----------
+    private static void stage1() {
+        if (lastDone >= 1) { System.out.println("Этап 1 уже завершён."); return; }
+        Predicate<PrintJob> a1 = j -> j.getPriority() >= 3 && j.getRequiredSheets() <= 8;
+
+        List<PrintJob> selected = createJobs().stream()
+                .filter(a1)
+                .sorted(Comparator.comparingInt(PrintJob::getId))
+                .collect(Collectors.toList());
+        PrintQueue<PrintJob> q = new PrintQueue<>(14);
+        selected.forEach(q::add);
+
+        List<Integer> ids = selected.stream().map(PrintJob::getId).collect(Collectors.toList());
+        int sheets = selected.stream().mapToInt(PrintJob::getRequiredSheets).sum();
+        try {
+            int b = StageAccess.second(n, ids, sheets);
+            queue = q;
+            lastDone = 1;
+            System.out.println("Добавлены задания (ID): " + ids);
+            System.out.println("Сумма потребностей: " + sheets);
+            System.out.println("Вариант задания 2: Б" + b);
+        } catch (IllegalStateException e) {
+            System.out.println(e.getMessage() + " — проверьте решение этапа 1.");
+        }
+    }
+
+    private static List<PrintJob> createJobs() {
+        List<PrintJob> all = new ArrayList<>();
+        all.add(new SingleSidedJob(101, 11, 5, 1, 5));
+        all.add(new SingleSidedJob(103, 12, 4, 2, 5));
+        all.add(new SingleSidedJob(105, 13, 3, 2, 2));
+        all.add(new SingleSidedJob(108, 14, 6, 1, 3));
+        all.add(new SingleSidedJob(110, 15, 8, 1, 2));
+        all.add(new DoubleSidedJob(102, 11, 5, 2, 4));
+        all.add(new DoubleSidedJob(104, 12, 7, 1, 3));
+        all.add(new DoubleSidedJob(106, 13, 9, 1, 4));
+        all.add(new DoubleSidedJob(107, 14, 2, 3, 1));
+        all.add(new DoubleSidedJob(109, 12, 1, 2, 4));
+        return all;
+    }
+
+    // ---------- Б4: резерв бумаги ----------
+    // Порядок: priority убыв., потребность возр., id возр.
+    // Сохранить не менее четверти остатка на начало вызова (округление вверх).
+    private static List<PrintJob> processB4() {
+        final int reserve = (queue.getPaper() + 3) / 4;   // считается один раз
+        Predicate<PrintJob> condition = j -> queue.getPaper() - j.getRequiredSheets() >= reserve;
+        Comparator<PrintJob> order = Comparator.comparingInt(PrintJob::getPriority).reversed()
+                .thenComparingInt(PrintJob::getRequiredSheets)
+                .thenComparingInt(PrintJob::getId);
+        Consumer<PrintJob> action = PrintJob::markPrinted;
+        return
+queue.process(condition, order, action);
+    }
+
+    // ---------- Этап 2 ----------
+    private static void stage2() {
+        if (lastDone >= 2) { System.out.println("Этап 2 уже завершён."); return; }
+        if (lastDone < 1) { System.out.println("Сначала выполните этап 1."); return; }
+
+        PrintQueue<PrintJob> backup = copyQueue(queue);
+        List<Integer> ids = processB4().stream().map(PrintJob::getId).collect(Collectors.toList());
+        int paper = queue.getPaper();
+        try {
+            int v = StageAccess.third(n, ids, paper);
+            lastDone = 2;
+            System.out.println("Выполнены (ID, по порядку): " + ids);
+            System.out.println("Остаток бумаги: " + paper);
+            System.out.println("Вариант задания 3: В" + v);
+        } catch (IllegalStateException e) {
+            System.out.println(e.getMessage() + " — проверьте решение этапа 2.");
+            queue = backup;
+        }
+    }
+
+    private static PrintQueue<PrintJob> copyQueue(PrintQueue<PrintJob> src) {
+        PrintQueue<PrintJob> copy = new PrintQueue<>(src.getPaper());
+        src.getAnalyticsStream().forEach(j -> {
+            PrintJob c = (j instanceof DoubleSidedJob)
+                    ? new DoubleSidedJob(j.getId(), j.getOwnerId(), j.getPages(), j.getCopies(), j.getPriority())
+                    : new SingleSidedJob(j.getId(), j.getOwnerId(), j.getPages(), j.getCopies(), j.getPriority());
+            copy.add(c);
+            if (j.isPrinted()) c.markPrinted();
+        });
+        return copy;
+    }
+
+    // ---------- Этап 3: В3 (+6 листов) ----------
+    private static void stage3() {
+        if (lastDone >= 3) { System.out.println("Этап 3 уже завершён.");
